@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — pre-token protocols ranked by implied value</title>
+<meta name="description" content="Every protocol that records no token, priced off the tokenized protocols in its own category and ranked by implied value, each with a concrete farm plan.">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <div class="brand"><span class="brand-dot" aria-hidden="true"></span><span class="brand-name">TOKEN&nbsp;RADAR</span><span class="brand-tag" id="brandTag">radar-2</span></div>
+    <p class="top-meta" id="topMeta"></p>
+  </div>
+</header>
+<main class="wrap">
+  <section class="hero">
+    <h1>Protocols with no token yet, ranked by what the token would be worth.</h1>
+    <p class="lede" id="lede"></p>
+    <div class="stats" id="stats"></div>
+  </section>
+
+  <section class="panel board-panel" aria-label="Ranked board">
+    <div class="controls">
+      <div class="tabs" role="tablist" aria-label="Board view">
+        <button type="button" class="tab active" id="tabBoard" role="tab" aria-selected="true">Pre-token board</button>
+        <button type="button" class="tab" id="tabLive" role="tab" aria-selected="false">Live tokens — the comparables</button>
+      </div>
+      <div class="filters">
+        <label class="field grow"><span>Search</span><input id="q" type="search" placeholder="Protocol, category or chain — press / to jump here" autocomplete="off"></label>
+        <label class="field"><span>Category</span><select id="fCategory"></select></label>
+        <label class="field"><span>Chain</span><select id="fChain"></select></label>
+        <label class="field"><span>Min TVL</span><select id="fTvl">
+          <option value="0">Any TVL</option>
+          <option value="10000000">$10M+</option>
+          <option value="50000000">$50M+</option>
+          <option value="250000000">$250M+</option>
+          <option value="1000000000">$1B+</option>
+        </select></label>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table id="board">
+        <thead id="boardHead"></thead>
+        <tbody id="boardBody"></tbody>
+      </table>
+    </div>
+    <p class="count" id="count"></p>
+  </section>
+
+  <section class="panel model-panel" id="modelPanel" aria-label="How the model prices a protocol"></section>
+</main>
+<footer class="wrap foot" id="foot"></footer>
+
+<dialog id="drawer" aria-label="Protocol detail"></dialog>
+<noscript><p class="wrap">This board needs JavaScript: the ranking, the model and every farm plan are rendered from the snapshot data file that ships with the page.</p></noscript>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
