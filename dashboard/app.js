@@ -1,269 +1,349 @@
-// Token Radar's dashboard (radar-2). It reads window.RADAR — written beside dashboard/ by main.ts —
-// and renders the ranked pre-token board, the live-token comparables it was priced from, sortable and
-// filterable tables, and a per-protocol detail drawer that shows the model's arithmetic and the
-// protocol's farm plan. No network: every byte it shows arrived in data.js, and every implied value
-// on the page is recomputed from the row's own model inputs and checked against the board's figure.
 'use strict';
-
+/* Token Launch Radar dashboard. Reads window.RADAR (written beside this page by the entry's
+   program) and renders three views: the pre-token board, the live-token set the model calibrated
+   on, and the model itself. Every figure the detail drawer prints is recomputed in the browser
+   from the printed inputs, and the drawer says whether the recompute lands on the printed value. */
 const R = window.RADAR;
+const M = R.model;
 const $ = (id) => document.getElementById(id);
+const nf = new Intl.NumberFormat('en-US');
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const money = (n) => (n === null || n === undefined ? '—' : '$' + nf.format(Math.round(n)));
+const num = (n) => nf.format(n);
+const ratio6 = (n) => n.toFixed(6);
+const ratio3 = (n) => n.toFixed(3);
+const mult4 = (n) => '×' + n.toFixed(4);
+const pct = (n) => (n === null ? '—' : (n > 0 ? '+' : '') + n.toFixed(1) + '%');
+const clampN = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+const catLabel = (c) => (c === null || c === '' ? 'Uncategorised' : c);
+const TIER_ORDER = { Prime: 0, Strong: 1, Watch: 2, Speculative: 3 };
 
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n) => {
-  if (n === null || n === undefined) return '—';
-  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-  if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
-  return '$' + Math.round(n);
-};
-const moneyFull = (n) => (n === null || n === undefined ? '—' : '$' + Math.round(n).toLocaleString('en-US'));
-const pct = (n) => (n === null || n === undefined ? null : (n > 0 ? '+' : '') + n.toFixed(1) + '%');
-const pctClass = (n) => (n === null || n === undefined || n === 0 ? 'flat' : n > 0 ? 'up' : 'down');
-const ageText = (days) => {
-  if (days === null || days === undefined) return 'n/a';
-  if (days < 60) return days + 'd';
-  if (days < 730) return (days / 30.44).toFixed(1) + ' mo';
-  return (days / 365.25).toFixed(1) + ' y';
-};
-const mult = (n) => '×' + n.toFixed(3);
-const chainsText = (chains) => (chains.length === 0 ? '—' : chains.length === 1 ? esc(chains[0]) : esc(chains[0]) + ' +' + (chains.length - 1));
+/* Recompute one row from the inputs printed beside it: the same rounding discipline the model
+   itself uses (ratio as stored, multipliers at 4 decimals, confidence parts at 4 decimals). */
+function recompute(row) {
+  const implied = Math.max(1, Math.round(row.tvl_usd * row.category_ratio * row.momentum_multiplier * row.age_multiplier * row.breadth_multiplier));
+  const low = Math.max(1, Math.round(implied / row.dispersion_factor));
+  const high = Math.round(implied * row.dispersion_factor);
+  const conf = clampN(Math.round(100 * (M.conf_weight_evidence * row.confidence_evidence + M.conf_weight_agreement * row.confidence_agreement + M.conf_weight_completeness * row.confidence_completeness)), 0, 100);
+  return {
+    implied, low, high, conf,
+    ok: implied === row.implied_value_usd && low === row.implied_low_usd && high === row.implied_high_usd && conf === row.confidence,
+  };
+}
+const CHECKS = R.rows.map((row) => ({ slug: row.slug, ...recompute(row) }));
+const CHECKS_OK = CHECKS.filter((c) => c.ok).length;
 
-/** The model's own arithmetic, redone on the page: the drawer shows this next to the board's figure. */
-function impliedOf(row) {
-  return Math.max(1, Math.round(row.tvl_usd * row.category_ratio * row.momentum_multiplier * row.age_multiplier * row.breadth_multiplier));
+const state = {
+  view: 'board',
+  sort: { key: 'rank', dir: 1 },
+  q: '', cat: '', chain: '', minTvl: 0, minConf: 0,
+  liveSort: { key: 'mcap', dir: -1 },
+  liveQ: '', liveCat: '', liveComp: false,
+};
+
+/* Deep links: #view=live, #view=method, #p=<slug>, plus filter parameters for the board shot. */
+function readHash() {
+  const h = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const view = h.get('view');
+  if (view === 'live' || view === 'method' || view === 'board') state.view = view;
+  if (h.get('q')) state.q = h.get('q');
+  if (h.get('cat')) state.cat = h.get('cat');
+  if (h.get('chain')) state.chain = h.get('chain');
+  if (h.get('mintvl')) state.minTvl = Number(h.get('mintvl')) || 0;
+  if (h.get('minconf')) state.minConf = Number(h.get('minconf')) || 0;
+  return h.get('p');
 }
 
-const state = { tab: 'board', q: '', category: '', chain: '', tvl: 0, sortKey: 'implied', sortDir: -1 };
+function buildChrome() {
+  const tm = $('topmeta');
+  tm.innerHTML = `<span class="pill">${esc(M.version)}</span><br>Snapshot <b>${esc(R.as_of)}</b> · universe floor <b>${money(R.floor_usd)}</b><br>`;
+  const src = document.createElement('span');
+  src.textContent = R.source;
+  tm.appendChild(src);
+  const stats = [
+    { k: 'Pre-token protocols ranked', v: num(R.board_size), s: `${num(R.watchlist_size)} watchlist · ${num(R.early_size)} early, below the floor` },
+    { k: 'Combined implied value', v: money(R.combined_implied_usd), s: 'if every ranked protocol launched at its model price' },
+    { k: 'Calibration set', v: num(R.comparable_size), s: `tokenized comparables across ${num(R.categories.length)} categories` },
+    { k: 'Global multiple', v: ratio3(M.global_ratio), s: `market cap per $1 of TVL · all-comparable dispersion ×${M.global_factor.toFixed(2)}` },
+    { k: 'Median confidence', v: `${R.median_confidence} / 100`, s: `tiers: Prime ≥ ${M.tier_prime} · Strong ≥ ${M.tier_strong} · Watch ≥ ${M.tier_watch}` },
+  ];
+  $('stats').innerHTML = stats.map((s) => `<div class="stat"><div class="k">${esc(s.k)}</div><div class="v">${esc(s.v)}</div><div class="s">${esc(s.s)}</div></div>`).join('');
+  const foot = $('foot');
+  foot.textContent = `Token Launch Radar · model ${M.version} · snapshot of ${R.as_of} · ${R.board_size} pre-token protocols ranked from ${R.comparable_size} tokenized comparables · every figure on this page recomputes from the inputs printed beside it.`;
+}
 
 function fillSelect(el, values, allLabel) {
-  el.innerHTML = '<option value="">' + esc(allLabel) + '</option>' + values.map((v) => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join('');
+  el.innerHTML = `<option value="">${esc(allLabel)}</option>` + values.map((v) => `<option value="${esc(v.key)}">${esc(v.label)}</option>`).join('');
 }
 
-function rowMatches(row) {
-  if (state.category && (row.category ?? 'Uncategorized') !== state.category) return false;
-  if (state.chain && !row.chains.includes(state.chain)) return false;
-  if (state.tvl && row.tvl_usd < state.tvl) return false;
-  if (state.q) {
-    const hay = (row.name + ' ' + row.slug + ' ' + (row.category ?? '') + ' ' + row.chains.join(' ')).toLowerCase();
-    if (!hay.includes(state.q)) return false;
-  }
-  return true;
+function buildFilters() {
+  const cats = [...new Set(R.rows.map((r) => catLabel(r.category)))].sort();
+  fillSelect($('f-cat'), cats.map((c) => ({ key: c, label: c })), 'All categories');
+  const chains = [...new Set(R.rows.flatMap((r) => r.chains))].sort();
+  fillSelect($('f-chain'), chains.map((c) => ({ key: c, label: c })), 'All chains');
+  const liveCats = [...new Set(R.live.map((r) => catLabel(r.category)))].sort();
+  fillSelect($('live-cat'), liveCats.map((c) => ({ key: c, label: c })), 'All categories');
+  $('q').value = state.q;
+  $('f-cat').value = state.cat;
+  $('f-chain').value = state.chain;
+  $('f-tvl').value = String(state.minTvl);
+  $('f-conf').value = String(state.minConf);
 }
 
-const BOARD_COLS = [
-  { key: 'rank', label: '#', sortable: false },
-  { key: 'name', label: 'Protocol', sortable: true, left: true },
-  { key: 'category', label: 'Category', sortable: false, left: true },
-  { key: 'chains', label: 'Chains', sortable: false, left: true },
-  { key: 'tvl', label: 'TVL', sortable: true },
-  { key: 'growth', label: '7d TVL', sortable: true },
-  { key: 'age', label: 'Age', sortable: true },
-  { key: 'implied', label: 'Implied value', sortable: true },
-  { key: 'plan', label: '', sortable: false },
-];
-const LIVE_COLS = [
-  { key: 'rank', label: '#', sortable: false },
-  { key: 'name', label: 'Protocol', sortable: true, left: true },
-  { key: 'category', label: 'Category', sortable: false, left: true },
-  { key: 'chains', label: 'Chains', sortable: false, left: true },
-  { key: 'tvl', label: 'TVL', sortable: true },
-  { key: 'mcap', label: 'Market cap', sortable: true },
-  { key: 'growth', label: '7d TVL', sortable: true },
-  { key: 'ratio', label: 'mcap / TVL', sortable: true },
-];
-
-function headHtml(cols) {
-  return '<tr>' + cols.map((c) => {
-    const cls = (c.left ? 'l' : '') + (c.sortable ? ' sortable' : '');
-    const arrow = c.sortable && state.sortKey === c.key ? ' <span class="arrow">' + (state.sortDir === 1 ? '▲' : '▼') + '</span>' : '';
-    return '<th class="' + cls.trim() + '"' + (c.sortable ? ' data-sort="' + c.key + '" tabindex="0"' : '') + '>' + esc(c.label) + arrow + '</th>';
-  }).join('') + '</tr>';
-}
-
-function sortRows(rows, live) {
-  const k = state.sortKey;
-  const dir = state.sortDir;
+const maxFactor = Math.max(...R.rows.map((r) => r.dispersion_factor));
+function boardRows() {
+  const q = state.q.trim().toLowerCase();
+  let rows = R.rows.filter((r) =>
+    (q === '' || r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q)) &&
+    (state.cat === '' || catLabel(r.category) === state.cat) &&
+    (state.chain === '' || r.chains.includes(state.chain)) &&
+    r.tvl_usd >= state.minTvl &&
+    r.confidence >= state.minConf);
+  const { key, dir } = state.sort;
   const val = (r) => {
-    switch (k) {
+    switch (key) {
       case 'name': return r.name.toLowerCase();
+      case 'category': return catLabel(r.category);
       case 'tvl': return r.tvl_usd;
-      case 'growth': return r.change_7d ?? -Infinity;
-      case 'age': return r.age_days ?? -1;
-      case 'mcap': return r.mcap_usd ?? -1;
-      case 'ratio': return r.ratio ?? -1;
-      default: return r.implied_value_usd ?? r.mcap_usd ?? 0;
+      case 'implied': return r.implied_value_usd;
+      case 'confidence': return r.confidence;
+      case 'tier': return TIER_ORDER[r.tier];
+      default: return r.rank;
     }
   };
-  return [...rows].sort((a, b) => {
-    const va = val(a);
-    const vb = val(b);
-    if (va < vb) return -dir;
-    if (va > vb) return dir;
-    return (a.name < b.name ? -1 : 1);
+  rows = [...rows].sort((a, b) => {
+    const va = val(a); const vb = val(b);
+    const cmp = typeof va === 'string' ? (va < vb ? -1 : va > vb ? 1 : 0) : va - vb;
+    return cmp * dir || a.rank - b.rank;
   });
+  return rows;
 }
 
 function renderBoard() {
-  $('boardHead').innerHTML = headHtml(BOARD_COLS);
-  const rows = sortRows(R.rows.filter(rowMatches), false);
-  const top = R.rows.length ? R.rows[0].implied_value_usd : 1;
-  $('boardBody').innerHTML = rows.length === 0
-    ? '<tr><td class="empty" colspan="' + BOARD_COLS.length + '">No protocol matches those filters. Loosen the search, the category, the chain or the TVL floor.</td></tr>'
-    : rows.map((r) => '<tr class="clickable" data-slug="' + esc(r.slug) + '">'
-      + '<td class="rank' + (r.rank <= 3 ? ' top' : '') + '">' + r.rank + '</td>'
-      + '<td class="l name-cell"><span class="nm">' + (r.on_watchlist ? '<span class="watch-dot" title="On the watchlist"></span>' : '') + esc(r.name) + '</span><span class="sl">' + esc(r.slug) + '</span></td>'
-      + '<td class="l cat">' + esc(r.category ?? 'Uncategorized') + '</td>'
-      + '<td class="l chains">' + chainsText(r.chains) + '</td>'
-      + '<td>' + money(r.tvl_usd) + '</td>'
-      + '<td class="' + pctClass(r.change_7d) + '">' + (pct(r.change_7d) ?? 'n/a') + '</td>'
-      + '<td>' + ageText(r.age_days) + '</td>'
-      + '<td class="value-cell"><span class="value-num">' + money(r.implied_value_usd) + '</span><span class="value-bar"><i style="width:' + Math.max(2, Math.round(100 * Math.sqrt(r.implied_value_usd / top))) + '%"></i></span></td>'
-      + '<td><button type="button" class="plan-btn" data-open="' + esc(r.slug) + '">Plan →</button></td>'
-      + '</tr>').join('');
-  $('count').textContent = 'Showing ' + rows.length + ' of ' + R.board_size + ' ranked protocols · amber dot = on the snapshot watchlist · click a row for the model breakdown and its farm plan';
-  wireRows();
+  const rows = boardRows();
+  $('board-count').textContent = `${num(rows.length)} of ${num(R.board_size)} protocols`;
+  $('board-empty').hidden = rows.length > 0;
+  $('board-body').innerHTML = rows.map((r) => {
+    const width = Math.max(6, Math.round((100 * Math.log(r.dispersion_factor)) / Math.log(maxFactor)));
+    return `<tr class="clickable" data-slug="${esc(r.slug)}" tabindex="0">
+      <td class="num rank">${r.rank}</td>
+      <td class="namecell"><span class="pname">${esc(r.name)}${r.on_watchlist ? '<span class="watchdot" title="On the snapshot watchlist">●</span>' : ''}</span><span class="pslug">${esc(r.slug)}</span></td>
+      <td class="hide-m">${esc(catLabel(r.category))}</td>
+      <td class="chains hide-m" title="${esc(r.chains.join(', '))}">${esc(r.chains.length > 4 ? `${r.chains.slice(0, 4).join(' · ')} +${r.chains.length - 4} more` : r.chains.join(' · ') || '—')}</td>
+      <td class="num">${money(r.tvl_usd)}</td>
+      <td class="num implied">${money(r.implied_value_usd)}</td>
+      <td class="hide-s"><span class="range">${money(r.implied_low_usd)} – ${money(r.implied_high_usd)}</span><span class="rangebar"><i style="width:${width}%"></i></span></td>
+      <td class="num"><span class="confcell"><span class="confnum">${r.confidence}</span><span class="confbar"><i style="width:${r.confidence}%"></i></span></span></td>
+      <td class="hide-s"><span class="tier tier-${esc(r.tier.toLowerCase())}"><i></i>${esc(r.tier)}</span></td>
+    </tr>`;
+  }).join('');
+  document.querySelectorAll('#board-table th.sortable').forEach((th) => {
+    const active = th.dataset.sort === state.sort.key;
+    th.innerHTML = th.textContent.replace(/ [↑↓]$/, '') + (active ? ` <span class="dir">${state.sort.dir === 1 ? '↑' : '↓'}</span>` : '');
+  });
+  $('board-foot').innerHTML = `Recompute check: <b>${num(CHECKS_OK)} of ${num(R.rows.length)} rows</b> reproduce exactly from the inputs printed in their detail view — implied value, range and confidence. Click any row for its full arithmetic and farm plan.`;
+}
+
+function liveRowsFiltered() {
+  const q = state.liveQ.trim().toLowerCase();
+  let rows = R.live.filter((r) =>
+    (q === '' || r.name.toLowerCase().includes(q) || r.slug.toLowerCase().includes(q) || (r.symbol ?? '').toLowerCase().includes(q)) &&
+    (state.liveCat === '' || catLabel(r.category) === state.liveCat) &&
+    (!state.liveComp || r.comparable));
+  const { key, dir } = state.liveSort;
+  const val = (r) => {
+    switch (key) {
+      case 'name': return r.name.toLowerCase();
+      case 'category': return catLabel(r.category);
+      case 'tvl': return r.tvl_usd;
+      case 'ratio': return r.ratio;
+      case 'change': return r.change_7d;
+      default: return r.mcap_usd !== null && r.mcap_usd > 0 ? r.mcap_usd : null;
+    }
+  };
+  return [...rows].sort((a, b) => {
+    const va = val(a); const vb = val(b);
+    if (va === null && vb === null) return a.slug < b.slug ? -1 : 1;
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    const cmp = typeof va === 'string' ? (va < vb ? -1 : va > vb ? 1 : 0) : va - vb;
+    return cmp * dir || (a.slug < b.slug ? -1 : 1);
+  });
 }
 
 function renderLive() {
-  $('boardHead').innerHTML = headHtml(LIVE_COLS);
-  const rows = sortRows(R.live.filter(rowMatches), true);
-  $('boardBody').innerHTML = rows.length === 0
-    ? '<tr><td class="empty" colspan="' + LIVE_COLS.length + '">No live-token protocol matches those filters.</td></tr>'
-    : rows.map((r, i) => '<tr>'
-      + '<td class="rank">' + (i + 1) + '</td>'
-      + '<td class="l name-cell"><span class="nm">' + esc(r.name) + '</span><span class="sl">' + esc(r.slug) + '</span></td>'
-      + '<td class="l cat">' + esc(r.category ?? 'Uncategorized') + '</td>'
-      + '<td class="l chains">' + chainsText(r.chains) + '</td>'
-      + '<td>' + money(r.tvl_usd) + '</td>'
-      + '<td>' + money(r.mcap_usd) + '</td>'
-      + '<td class="' + pctClass(r.change_7d) + '">' + (pct(r.change_7d) ?? 'n/a') + '</td>'
-      + '<td>' + (r.ratio === null ? 'n/a' : r.ratio.toFixed(2) + '×') + '</td>'
-      + '</tr>').join('');
-  $('count').textContent = 'Showing ' + rows.length + ' of ' + R.live_size + ' live-token protocols · these already trade, so they are never ranked — their mcap/TVL ratios are the comparables the model prices the board from';
-  wireRows();
+  const rows = liveRowsFiltered();
+  $('live-count').textContent = `${num(rows.length)} of ${num(R.live_size)} live-token protocols · ${num(R.comparable_size)} comparables`;
+  $('live-empty').hidden = rows.length > 0;
+  $('live-body').innerHTML = rows.map((r) => `<tr>
+      <td class="namecell"><span class="pname">${esc(r.name)}</span><span class="pslug">${esc(r.slug)}</span></td>
+      <td class="hide-m">${esc(r.symbol ?? '—')}</td>
+      <td class="hide-m">${esc(catLabel(r.category))}</td>
+      <td class="chains hide-s" title="${esc(r.chains.join(', '))}">${esc(r.chains.length > 4 ? `${r.chains.slice(0, 4).join(' · ')} +${r.chains.length - 4} more` : r.chains.join(' · ') || '—')}</td>
+      <td class="num">${money(r.tvl_usd)}</td>
+      <td class="num">${r.mcap_usd !== null && r.mcap_usd > 0 ? money(r.mcap_usd) : '—'}</td>
+      <td class="num">${r.ratio === null ? '—' : ratio3(r.ratio)}</td>
+      <td class="num hide-s"><span class="${r.change_7d === null || r.change_7d === 0 ? 'flat' : r.change_7d > 0 ? 'pos' : 'neg'}">${pct(r.change_7d)}</span></td>
+      <td>${r.comparable ? '<span class="comp-yes">Comparable</span>' : '<span class="comp-no">Not used</span>'}</td>
+    </tr>`).join('');
+  document.querySelectorAll('#live-table th.sortable').forEach((th) => {
+    const active = th.dataset.lsort === state.liveSort.key;
+    th.innerHTML = th.textContent.replace(/ [↑↓]$/, '') + (active ? ` <span class="dir">${state.liveSort.dir === 1 ? '↑' : '↓'}</span>` : '');
+  });
 }
 
-function render() {
-  if (state.tab === 'board') renderBoard();
-  else renderLive();
-}
-
-function wireRows() {
-  document.querySelectorAll('#boardBody tr.clickable').forEach((tr) => {
-    tr.addEventListener('click', () => openDrawer(tr.getAttribute('data-slug')));
-  });
-  document.querySelectorAll('#boardHead th.sortable').forEach((th) => {
-    const go = () => {
-      const key = th.getAttribute('data-sort');
-      if (state.sortKey === key) state.sortDir = -state.sortDir;
-      else { state.sortKey = key; state.sortDir = key === 'name' ? 1 : -1; }
-      render();
-    };
-    th.addEventListener('click', go);
-    th.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
-  });
+function renderMethod() {
+  const bt = M.backtest;
+  const miss = (line) => '×' + Math.exp(line.median_abs_log_error).toFixed(2);
+  const catRows = R.categories.map((c) => `<tr><td>${esc(catLabel(c.category))}</td><td>${c.comps}</td><td>${ratio3(c.center_ratio)}</td><td>${ratio3(c.ratio)}</td><td>${c.sigma.toFixed(3)}</td><td>×${c.factor.toFixed(2)}</td></tr>`).join('');
+  $('method-body').innerHTML = `<div class="method">
+    <h2>The model in one line</h2>
+    <div class="formula">implied mcap = round( TVL × category multiple × momentum × maturity × breadth )</div>
+    <p>A protocol with no token is priced the way the market already prices the ones that trade. Every tokenized protocol in the same snapshot is a <b>comparable</b>: its market-cap/TVL ratio says what one dollar of locked value is worth once a token exists. radar-3 reads those ratios in log space, calibrates one multiple per category, and adjusts for what the snapshot reports about the protocol itself — its seven-day momentum, how long it has run with no token, and how many chains hold its value.</p>
+    <h2>How the category multiple is calibrated</h2>
+    <ul>
+      <li><b>Comparables.</b> A protocol votes when it records a token and both its market cap and its TVL are real and positive: ${num(M.global_comps)} voters across ${num(R.categories.length)} categories. A market cap of 0 prices nothing, and the snapshot's −1 "not reported" sentinel is ignored, never divided by.</li>
+      <li><b>Winsorized.</b> Each comparable's raw ratio is clamped to [${M.ratio_obs_floor}, ${M.ratio_obs_cap}] before it counts, so one mispriced microcap cannot drag a whole category.</li>
+      <li><b>Geometric mean, shrunk.</b> A category's center is the mean of its comparables' log-ratios. Thin categories are shrunk toward the global center with a pseudo-count of K = ${M.shrink_k}: a category with 2 voters is pulled hard toward the market; one with 15 barely moves.</li>
+      <li><b>Bounded.</b> No applied multiple leaves [${M.ratio_final_min}, ${M.ratio_final_max}]. A category with no comparables at all is priced off the global multiple, ${ratio3(M.global_ratio)}, and its row says so.</li>
+    </ul>
+    <h2>The three adjustments</h2>
+    <table class="kv">
+      <tr><th>Momentum</th><td>×(1 + ${M.momentum_weight} × clamp(7d change, ${M.momentum_floor}, ${M.momentum_cap}) / 100)</td><td class="note">no reported change is neutral at exactly ×1</td></tr>
+      <tr><th>Maturity</th><td>×(${M.maturity_base} + ${M.maturity_range} × min(age, ${num(M.maturity_days)} days) / ${num(M.maturity_days)})</td><td class="note">an unknown age counts as 365 days</td></tr>
+      <tr><th>Breadth</th><td>×(1 + ${M.breadth_per_chain} per chain past the first, up to 6)</td><td class="note">more chains, more holders to launch to</td></tr>
+    </table>
+    <h2>The plausible range</h2>
+    <p>Comparables inside a category disagree, and the disagreement is measured, not hidden: a robust MAD sigma of the category's log-ratios, shrunk toward the pooled within-category dispersion (σ = ${M.pooled_sigma.toFixed(3)} across all categories). The factor f = e<sup>σ</sup> turns the point estimate into a band, <b>implied / f to implied × f</b> — where launches in that category have actually landed relative to the multiple. Across the whole market the dispersion is wider (×${M.global_factor.toFixed(2)}), which is exactly why the model prices by category and not by one global number.</p>
+    <h2>Confidence, 0–100</h2>
+    <p>Every row states how much its own number should be trusted, from three parts: <b>evidence</b> (${Math.round(M.conf_weight_evidence * 100)}% — how many comparables priced the row, n / (n + ${M.conf_evidence_k})), <b>agreement</b> (${Math.round(M.conf_weight_agreement * 100)}% — how tightly they agree, 1 / (1 + σ)), and <b>completeness</b> (${Math.round(M.conf_weight_completeness * 100)}% — how much of the protocol's own record the snapshot reports: 7d change, listing date, category, chains). Tiers: <b>Prime ≥ ${M.tier_prime}</b>, <b>Strong ≥ ${M.tier_strong}</b>, <b>Watch ≥ ${M.tier_watch}</b>, Speculative below. The board's biggest prize can honestly carry a middling score: the top rows sit in a category with a single comparable, and the score says so.</p>
+    <h2>Category calibration</h2>
+    <div class="catwrap"><table class="cats"><thead><tr><th>Category</th><th>Comparables</th><th>Center</th><th>Applied ×</th><th>σ</th><th>Range factor</th></tr></thead>
+    <tbody><tr><td>All categories (global)</td><td>${M.global_comps}</td><td>${ratio3(M.global_ratio)}</td><td>${ratio3(M.global_ratio)}</td><td>${M.global_sigma.toFixed(3)}</td><td>×${M.global_factor.toFixed(2)}</td></tr>${catRows}</tbody></table></div>
+    <h2>Backtest: pricing the protocols that already have tokens</h2>
+    <p>The model's own exam, sat on this snapshot: each of the ${bt.n} comparables is priced as if it were pre-token, with its own observation left out of every figure it is priced with, and the estimate is compared with its real market cap. Three rules sit the same exam.</p>
+    <table class="kv">
+      <tr><th>Naive global multiple</th><td>median |log error| ${bt.naive.median_abs_log_error.toFixed(4)}</td><td>typical miss ${miss(bt.naive)}</td><td>within 2× for ${bt.naive.within_2x_pct.toFixed(1)}%</td></tr>
+      <tr><th>Category multiple alone</th><td>median |log error| ${bt.category.median_abs_log_error.toFixed(4)}</td><td>typical miss ${miss(bt.category)}</td><td>within 2× for ${bt.category.within_2x_pct.toFixed(1)}%</td></tr>
+      <tr><th>radar-3, full model</th><td>median |log error| ${bt.full.median_abs_log_error.toFixed(4)}</td><td>typical miss ${miss(bt.full)}</td><td>within 2× for ${bt.full.within_2x_pct.toFixed(1)}%</td></tr>
+    </table>
+    <p>Category calibration is the big win: the typical error falls from ${miss(bt.naive)} to ${miss(bt.category)} against the naive multiple, because a dollar of lending TVL and a dollar of DEX TVL are not worth the same. The naive rule still lands within 2× slightly more often — it parks every estimate in the middle of the distribution, so it is often vaguely close and never specifically right, and it cannot tell one category from another at all. The full model's adjustments cost it a little on this exam, for a stated reason: a comparable's momentum and age are already inside its real market cap, so re-applying them double-counts. For a protocol with no token — the board's actual subject — those are precisely the signals a bare multiple misses. No TVL-based model prices launches tightly; that is why every row carries its range and its confidence instead of pretending otherwise.</p>
+    <h2>The universe</h2>
+    <p>The board ranks ${num(R.board_size)} protocols: the snapshot's ${num(R.watchlist_size)}-strong watchlist, covered whole, plus ${num(R.early_size)} early protocols the same screen finds below the ${money(R.floor_usd)} floor. The screen is the house's own, with no TVL floor: a protocol is rankable when it records no token and is not a wrapped, staked or bridged product of one that trades — its category is not a bridge, liquid-staking, restaking or exchange category, its name ends in no version marker, carries no whole word wrapped, staked or staking, and begins with no exchange's name. No protocol is special-cased, and none is ranked by a hardcoded figure.</p>
+    <h2>Edge cases and integrity</h2>
+    <ul>
+      <li>The one protocol carrying the −1 market-cap sentinel is treated as unreported, never as a negative price; zero caps vote in nothing.</li>
+      <li>Missing 7-day changes are neutral, missing listing dates count as a 365-day age, and no row can emit NaN or infinity — the program refuses to write a board that breaks its own rules.</li>
+      <li>The run is deterministic: the same snapshot produces byte-identical outputs, twice verified.</li>
+      <li>Every row recomputes on this page from its printed inputs: <b>${num(CHECKS_OK)} of ${num(R.rows.length)} rows reproduce exactly</b> — check any row's detail view.</li>
+    </ul>
+  </div>`;
 }
 
 function openDrawer(slug) {
   const r = R.rows.find((row) => row.slug === slug);
   if (!r) return;
-  const check = impliedOf(r);
-  const catLabel = r.category ?? 'Uncategorized';
-  const momNote = r.change_7d === null
-    ? 'no 7-day change reported, so momentum is neutral'
-    : '7-day TVL change ' + pct(r.change_7d) + ', clamped to [' + R.model.momentum_floor + ', +' + R.model.momentum_cap + '] and weighted ' + R.model.momentum_weight;
-  const ageNote = r.age_days === null
-    ? 'listing date not reported; the model counts a neutral 365 days'
-    : 'running ' + r.age_days.toLocaleString('en-US') + ' days with no token (listed ' + esc(r.listed_at) + ')';
-  $('drawer').innerHTML = '<div class="drawer-in">'
-    + '<div class="drawer-head"><div><h2>' + esc(r.name) + '</h2><div class="drawer-sub">rank #' + r.rank + ' of ' + R.board_size + ' · ' + esc(r.slug) + '</div>'
-    + (r.on_watchlist ? '<span class="badge watch">ON THE WATCHLIST</span>' : '<span class="badge early">EARLY — BELOW THE $' + (R.floor_usd / 1e6) + 'M WATCHLIST FLOOR</span>')
-    + '</div><button type="button" class="close-btn" id="drawerClose">Close ✕</button></div>'
-    + '<div class="drawer-stats">'
-    + '<div class="stat"><span class="k">Implied value</span><span class="v" style="color:var(--amber)">' + money(r.implied_value_usd) + '</span></div>'
-    + '<div class="stat"><span class="k">TVL</span><span class="v">' + money(r.tvl_usd) + '</span></div>'
-    + '<div class="stat"><span class="k">7d TVL</span><span class="v ' + pctClass(r.change_7d) + '">' + (pct(r.change_7d) ?? 'n/a') + '</span></div>'
-    + '<div class="stat"><span class="k">Age</span><span class="v">' + ageText(r.age_days) + '</span></div>'
-    + '</div>'
-    + '<h3>Where it runs</h3><p class="chain-list">' + (r.chains.length ? r.chains.map(esc).join(' · ') : 'No chains reported') + ' — category: ' + esc(catLabel) + '. ' + esc(r.name) + ' records no token in the snapshot: no market cap, no CoinGecko id, no symbol.</p>'
-    + '<h3>How the model prices it</h3>'
-    + '<table class="breakdown"><tbody>'
-    + '<tr><td>TVL locked today</td><td class="n">' + moneyFull(r.tvl_usd) + '</td></tr>'
-    + '<tr><td>× Category multiple — median mcap/TVL of ' + r.ratio_comps + ' tokenized ' + esc(catLabel) + ' protocol' + (r.ratio_comps === 1 ? '' : 's') + ', shrunk toward the global median ' + R.model.global_ratio.toFixed(3) + '</td><td class="n">' + mult(r.category_ratio) + '</td></tr>'
-    + '<tr><td>× Momentum — ' + esc(momNote) + '</td><td class="n">' + mult(r.momentum_multiplier) + '</td></tr>'
-    + '<tr><td>× Maturity — ' + esc(ageNote) + '</td><td class="n">' + mult(r.age_multiplier) + '</td></tr>'
-    + '<tr><td>× Breadth — ' + r.chains.length + ' chain' + (r.chains.length === 1 ? '' : 's') + ', +' + Math.round(R.model.breadth_per_chain * 100) + '% per extra chain up to six</td><td class="n">' + mult(r.breadth_multiplier) + '</td></tr>'
-    + '<tr class="total"><td>Implied value if it launched at category value</td><td class="n">' + moneyFull(r.implied_value_usd) + '</td></tr>'
-    + '</tbody></table>'
-    + '<p class="check-line">✓ recomputed on this page from the row\'s own inputs: ' + moneyFull(check) + (check === r.implied_value_usd ? ' — matches the board' : ' — differs from the board, trust the board') + '</p>'
-    + '<h3>Farm plan — positioning for a possible launch</h3>'
-    + '<ol class="steps">' + r.farm_steps.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ol>'
-    + '<p class="chain-list" style="margin-top:14px">A plan is positioning, not a promise: ' + esc(r.name) + ' may never launch a token. Amounts are sized to the protocol\'s TVL and its main chain\'s gas, and every step can be skipped — the first two do most of the work.</p>'
-    + '</div>';
-  const d = $('drawer');
-  $('drawerClose').addEventListener('click', () => d.close());
-  if (typeof d.showModal === 'function') d.showModal();
+  const check = recompute(r);
+  const momWhy = r.momentum_pct === null ? 'no 7d change reported — neutral' : `7d change ${pct(r.momentum_pct)}${r.change_7d !== null && r.change_7d !== r.momentum_pct ? ` (reported ${pct(r.change_7d)}, clamped)` : ''}`;
+  const ageWhy = r.age_days === null ? 'no listing date — counted as 365 days' : `listed ${num(r.age_days)} days ago`;
+  const catWhy = r.used_global_ratio
+    ? `${catLabel(r.category)} has no tokenized comparables — priced off the global multiple`
+    : `${catLabel(r.category)} · ${r.ratio_comps} comparable${r.ratio_comps === 1 ? '' : 's'} · center ${ratio6(r.center_ratio)} before shrinkage`;
+  const part = (label, value) => `<div class="confpart"><span>${label}</span><span class="bar"><i style="width:${Math.round(value * 100)}%"></i></span><span class="pv">${value.toFixed(4)}</span></div>`;
+  $('drawer-body').innerHTML = `
+    <h2>${esc(r.name)}</h2>
+    <div class="dsub">${esc(r.slug)} · rank ${r.rank} of ${num(R.board_size)}</div>
+    <div class="dbadges">
+      <span class="badge accent">${esc(r.tier)} · confidence ${r.confidence}</span>
+      <span class="badge">${esc(catLabel(r.category))}</span>
+      ${r.on_watchlist ? '<span class="badge">Watchlist</span>' : '<span class="badge">Early — below the floor</span>'}
+      <span class="badge">Pre-token</span>
+    </div>
+    <div class="bigfig">
+      <div class="bf"><div class="k">Implied mcap</div><div class="v">${money(r.implied_value_usd)}</div></div>
+      <div class="bf"><div class="k">Plausible range</div><div class="v">${money(r.implied_low_usd)} – ${money(r.implied_high_usd)}</div></div>
+      <div class="bf"><div class="k">TVL</div><div class="v">${money(r.tvl_usd)}</div></div>
+    </div>
+    <h3>The arithmetic</h3>
+    <table class="calc">
+      <tr><th>Total value locked</th><td>${money(r.tvl_usd)}</td></tr>
+      <tr><th>Category multiple<span class="why">${esc(catWhy)}</span></th><td>${ratio6(r.category_ratio)}</td></tr>
+      <tr><th>Momentum<span class="why">${esc(momWhy)}</span></th><td>${mult4(r.momentum_multiplier)}</td></tr>
+      <tr><th>Maturity<span class="why">${esc(ageWhy)}</span></th><td>${mult4(r.age_multiplier)}</td></tr>
+      <tr><th>Breadth<span class="why">${r.chains.length} chain${r.chains.length === 1 ? '' : 's'}: ${esc(r.chains.join(', ') || 'none reported')}</span></th><td>${mult4(r.breadth_multiplier)}</td></tr>
+      <tr class="total"><th>Implied market cap</th><td>${money(r.implied_value_usd)}</td></tr>
+      <tr><th>Range<span class="why">dispersion σ ${r.sigma.toFixed(4)} → factor ${mult4(r.dispersion_factor)}; low = implied / f, high = implied × f</span></th><td>${money(r.implied_low_usd)} – ${money(r.implied_high_usd)}</td></tr>
+    </table>
+    <div class="checkline ${check.ok ? 'ok' : 'bad'}">${check.ok ? '✓ Recomputed on this page from the inputs above: implied value, range and confidence all reproduce exactly.' : '✗ Recompute mismatch — this row does not reproduce from its printed inputs.'}</div>
+    <h3>Confidence — ${r.confidence} / 100 (${esc(r.tier)})</h3>
+    <div class="confparts">
+      ${part('Evidence', r.confidence_evidence)}
+      ${part('Agreement', r.confidence_agreement)}
+      ${part('Completeness', r.confidence_completeness)}
+    </div>
+    <h3>Farm plan</h3>
+    <p class="plannote">${esc(r.plan_note)}</p>
+    <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>`;
+  $('drawer').hidden = false;
+  $('scrim').hidden = false;
+}
+function closeDrawer() {
+  $('drawer').hidden = true;
+  $('scrim').hidden = true;
 }
 
-function renderModel() {
-  const m = R.model;
-  $('modelPanel').innerHTML = '<h2>How radar-2 prices a protocol with no token</h2>'
-    + '<p>The market has already priced hundreds of token launches. Each tokenized protocol in the snapshot is a comparable: its market cap divided by its TVL says what one locked dollar is worth once a token trades. radar-2 takes the <strong>median</strong> of those ratios inside each category — medians ignore the one wild outlier — shrinks categories with few comparables toward the global median of <strong>' + m.global_ratio.toFixed(3) + '</strong> (from ' + m.global_comps + ' tokenized protocols with a market cap), winsorizes every single ratio to [0.02, 5] before it can vote, and never lets a category multiple leave [0.03, 3]. The same function prices every row; no name is special-cased, and tokenized protocols are set aside as comparables, never ranked.</p>'
-    + '<p class="formula">implied = TVL × <b>category multiple</b> × <b>momentum</b> × <b>maturity</b> × <b>breadth</b></p>'
-    + '<div class="model-grid">'
-    + '<div class="model-card"><h3>Category multiple</h3><p>The shrunk median mcap/TVL of the protocol\'s own category. Lending dollars and DEX dollars are not worth the same once tokenized, and the model refuses to pretend they are.</p></div>'
-    + '<div class="model-card"><h3>Momentum ×' + '0.82–1.27' + '</h3><p>1 + ' + m.momentum_weight + ' × the 7-day TVL change, clamped to [' + m.momentum_floor + '%, +' + m.momentum_cap + '%]. Growing protocols launch into demand; shrinking ones launch into a headwind. No reported change is neutral.</p></div>'
-    + '<div class="model-card"><h3>Maturity ×' + m.maturity_base.toFixed(2) + '–' + (m.maturity_base + m.maturity_range).toFixed(2) + '</h3><p>Rises with days since listing, over ' + m.maturity_days.toLocaleString('en-US') + ' days. A protocol that has run for years with no token has a holder base and a record; a three-week-old one has a chart.</p></div>'
-    + '<div class="model-card"><h3>Breadth ×1.00–1.20</h3><p>+' + Math.round(m.breadth_per_chain * 100) + '% for each chain past the first, up to six. Value held on several chains means several communities a launch can reach on day one.</p></div>'
-    + '</div>';
-}
-
-function init() {
-  if (!R || !Array.isArray(R.rows)) {
-    document.body.innerHTML = '<main class="wrap"><section class="panel model-panel"><h2>Data file missing</h2><p>window.RADAR was not set: run the entry (node main.ts) so data.js is written beside dashboard/, then reload.</p></section></main>';
-    return;
+function switchView(view) {
+  state.view = view;
+  for (const v of ['board', 'live', 'method']) {
+    $(`view-${v}`).hidden = v !== view;
+    $(`tab-${v}`).classList.toggle('is-active', v === view);
   }
-  $('brandTag').textContent = R.model_version;
-  $('topMeta').textContent = 'snapshot ' + R.as_of + ' · ' + R.source;
-  const total = R.rows.reduce((s, r) => s + r.implied_value_usd, 0);
-  const sorted = [...R.rows].sort((a, b) => a.implied_value_usd - b.implied_value_usd);
-  const medianImplied = sorted.length ? sorted[Math.floor(sorted.length / 2)].implied_value_usd : 0;
-  $('lede').innerHTML = 'The snapshot covers hundreds of protocols; <strong>' + R.board_size + ' of them record no token</strong> and pass the launch screen — every one of the <strong>' + R.watchlist_size + ' watchlist</strong> names plus <strong>' + R.early_size + ' early protocols</strong> below the $' + (R.floor_usd / 1e6) + 'M watchlist floor. radar-2 prices each from the tokenized protocols in its own category and ranks them by implied value. Every row opens a detail view with the full arithmetic and a five-step farm plan with costs and durations.';
-  $('stats').innerHTML = [
-    ['Protocols ranked', R.board_size, ''],
-    ['Watchlist covered', R.watchlist_size + ' / ' + R.watchlist_size, ''],
-    ['Early rows found', R.early_size, 'below the floor'],
-    ['Tokenized comparables', R.model.global_comps, 'with a market cap'],
-    ['Combined implied value', money(total), ''],
-    ['Median implied value', money(medianImplied), ''],
-  ].map(([k, v, s]) => '<div class="stat"><span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + (s ? ' <small>' + esc(s) + '</small>' : '') + '</span></div>').join('');
-  fillSelect($('fCategory'), [...new Set(R.rows.map((r) => r.category ?? 'Uncategorized'))].sort(), 'All categories');
-  const chainCounts = new Map();
-  for (const r of R.rows) for (const c of r.chains) chainCounts.set(c, (chainCounts.get(c) ?? 0) + 1);
-  fillSelect($('fChain'), [...chainCounts.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c), 'All chains');
-  $('q').addEventListener('input', (e) => { state.q = e.target.value.trim().toLowerCase(); render(); });
-  $('fCategory').addEventListener('change', (e) => { state.category = e.target.value; render(); });
-  $('fChain').addEventListener('change', (e) => { state.chain = e.target.value; render(); });
-  $('fTvl').addEventListener('change', (e) => { state.tvl = Number(e.target.value) || 0; render(); });
-  const setTab = (tab) => {
-    state.tab = tab;
-    state.sortKey = tab === 'board' ? 'implied' : 'mcap';
-    state.sortDir = -1;
-    $('tabBoard').classList.toggle('active', tab === 'board');
-    $('tabLive').classList.toggle('active', tab === 'live');
-    $('tabBoard').setAttribute('aria-selected', String(tab === 'board'));
-    $('tabLive').setAttribute('aria-selected', String(tab === 'live'));
-    render();
-  };
-  $('tabBoard').addEventListener('click', () => setTab('board'));
-  $('tabLive').addEventListener('click', () => setTab('live'));
-  document.addEventListener('keydown', (e) => {
-    if (e.key === '/' && document.activeElement !== $('q') && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('q').focus(); }
-  });
-  renderModel();
-  $('foot').innerHTML = '<p>Source: ' + esc(R.source) + ' snapshot as of ' + esc(R.as_of) + '. A protocol "records no token" when the snapshot carries no market cap, no CoinGecko id and no symbol for it; tokenized protocols are shown only as comparables.</p>'
-    + '<p>Implied values are a model\'s estimate of what a launch would be worth at category value — not a prediction that a launch happens, and not financial advice. Farm plans describe positioning a real user would do anyway; do them only with funds you can leave parked.</p>';
-  render();
+  if (view === 'live') renderLive();
+  if (view === 'method') renderMethod();
 }
 
-document.addEventListener('DOMContentLoaded', init);
+function wire() {
+  document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchView(t.dataset.view)));
+  $('q').addEventListener('input', (e) => { state.q = e.target.value; renderBoard(); });
+  $('f-cat').addEventListener('change', (e) => { state.cat = e.target.value; renderBoard(); });
+  $('f-chain').addEventListener('change', (e) => { state.chain = e.target.value; renderBoard(); });
+  $('f-tvl').addEventListener('change', (e) => { state.minTvl = Number(e.target.value); renderBoard(); });
+  $('f-conf').addEventListener('change', (e) => { state.minConf = Number(e.target.value); renderBoard(); });
+  document.querySelectorAll('#board-table th.sortable').forEach((th) => th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (state.sort.key === key) state.sort.dir *= -1;
+    else state.sort = { key, dir: key === 'name' || key === 'category' ? 1 : -1 };
+    if (key === 'rank') state.sort.dir = 1;
+    renderBoard();
+  }));
+  $('board-body').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-slug]');
+    if (tr) openDrawer(tr.dataset.slug);
+  });
+  $('board-body').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const tr = e.target.closest('tr[data-slug]');
+      if (tr) openDrawer(tr.dataset.slug);
+    }
+  });
+  $('live-q').addEventListener('input', (e) => { state.liveQ = e.target.value; renderLive(); });
+  $('live-cat').addEventListener('change', (e) => { state.liveCat = e.target.value; renderLive(); });
+  $('live-comp').addEventListener('change', (e) => { state.liveComp = e.target.checked; renderLive(); });
+  document.querySelectorAll('#live-table th.sortable').forEach((th) => th.addEventListener('click', () => {
+    const key = th.dataset.lsort;
+    if (state.liveSort.key === key) state.liveSort.dir *= -1;
+    else state.liveSort = { key, dir: key === 'name' || key === 'category' ? 1 : -1 };
+    renderLive();
+  }));
+  $('drawer-close').addEventListener('click', closeDrawer);
+  $('scrim').addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
+}
+
+const deepSlug = readHash();
+buildChrome();
+buildFilters();
+wire();
+renderBoard();
+switchView(state.view);
+if (deepSlug) openDrawer(deepSlug);
